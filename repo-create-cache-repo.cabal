@@ -1,0 +1,14 @@
+Name:          repo-create-cache-repo
+Version:       0.1.0
+Synopsis:      Creates a pacman repo of installed pkgs in your pacman cache dir (assuming you only have one)
+License:       BSD3
+License-file:  LICENSE
+Author:        StephenB
+Maintainer:    mail4stb@gmail.com
+Build-Type:    Simple
+Cabal-Version: >=1.2
+
+Executable repo-create-cache-repo
+  Main-is:       RepoCreateCacheRepo.hs
+  Build-Depends: base >=4.3, utility-ht >=0.0.4, HSH ==2.*, filemanip, old-time, directory, containers >=0.4
+  ghc-options:   -Wall -O
