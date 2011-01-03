@@ -1,8 +1,0 @@
-I'm in the processing of writing this, just uploaded to github for safe keeping.
-=========
-
-I'm learning Haskell as I go, and this is a nice small project to learn with.
-
-For Arch Linux users: no I'm not using libalpm
----------
-That would be too much work for such a simple thing. But I did have a go! And got alpm to load in ghci and initialised it.
