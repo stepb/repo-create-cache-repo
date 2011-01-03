@@ -1,21 +1,21 @@
 {-# LANGUAGE PatternGuards #-}
 
--- alpm_option_get_cachedirs (pacman.c 1427)
--- clean up is on line 277 (init 1326)
-
-import Control.Monad (foldM)
+import Control.Monad (foldM, liftM)
 import Data.Char (isSpace)
 import qualified Data.Foldable as DF
-import Data.List (isPrefixOf, stripPrefix)
+import Data.List (isPrefixOf, stripPrefix, intercalate)
+import qualified Data.Map as Map
 import qualified Data.Set as Set
-import Data.String.HT (trim)
+-- import Data.String.HT (trim)
 import HSH (run)
-import System.Directory (getModificationTime)
+import System.Directory (getModificationTime, getDirectoryContents)
 import System.Environment (getProgName, getArgs)
 import System.Exit (ExitCode(..), exitWith)
-import qualified System.FilePath.Find as F
+import System.FilePath (replaceDirectory, takeFileName)
 import System.IO (hSetBuffering, stdout, BufferMode(NoBuffering))
-import System.Time (ClockTime(TOD))
+
+
+-- * Usage and argument processing
 
 showUsageAndExit :: ExitCode -> IO a
 showUsageAndExit exitCode = do
@@ -28,10 +28,6 @@ showUsageAndExit exitCode = do
            \                pacman config"
   exitWith exitCode
 
-putMe, putMeLn :: String -> IO ()
-putMe s = getProgName >>= \p -> putStr $ concat [p, ": ", s]
-putMeLn s = putMe (s ++ "\n")
-
 -- TODO update
 repoNameFromArgsOrShowUsage :: IO String
 repoNameFromArgsOrShowUsage =
@@ -43,15 +39,25 @@ repoNameFromArgsOrShowUsage =
          [x]        -> return x
          (_:_:_)    -> showUsageAndExit (ExitFailure 1)
 
-findYoungestFile :: [FilePath] -> IO FilePath
-findYoungestFile xs =
-  foldM f (TOD 0 0, "") xs >>= \(_, fp) -> return fp
-  where f :: (ClockTime, FilePath) -> FilePath -> IO (ClockTime, FilePath)
-        f youngest@(yct, _) fp = do
-          nct <- getModificationTime fp
-          if nct > yct
-             then return (nct, fp)
-             else return youngest
+
+-- * General helper functions
+
+putMe, putMeLn :: String -> IO ()
+putMe s = getProgName >>= \p -> putStr $ concat [p, ": ", s]
+putMeLn s = putMe (s ++ "\n")
+
+-- | Trims any leading and trailing spaces from a string
+trim :: String -> String
+trim = dropWhile isSpace . reverse . dropWhile isSpace . reverse
+
+getRealDirectoryContentsFullPaths :: FilePath -> IO [FilePath]
+getRealDirectoryContentsFullPaths dir = do
+  fileNames <- filter (`notElem` [".",".."]) `liftM` getDirectoryContents dir
+  -- This is a cunning way of adding on the dir
+  return $ map (`replaceDirectory` dir) fileNames
+
+
+-- * Types
 
 type PkgName = String
 type PkgVersion = String
@@ -69,7 +75,10 @@ type PkgIdSet = Set.Set PkgId
 
 type PkgFilePath = FilePath
 type CacheDir = FilePath
-type PkgCache = [PkgFilePath]
+type PkgCache = Map.Map PkgId PkgFilePath
+
+
+-- * Main program functions
 
 -- | Discovers the pacman cache dir by looking at pacman's verbose output.
 pacmanCacheDir :: IO CacheDir
@@ -103,26 +112,64 @@ installedPkgIdSet =
                   putMeLn $ "ignoring strange package: " ++ line
                   return set
 
-pkgCache :: CacheDir -> PkgIdSet -> IO PkgCache
-pkgCache cacheDir pkgIdSet =
-  DF.foldrM f [] pkgIdSet
-  where f pkgId xs =
-          F.find F.always (F.fileName F.~~? (filePrefix ++ "*")) cacheDir >>=
-            \fs -> case fs of
-                        []  -> do
-                          putMeLn $ "package installed but not found in cache: " ++ show pkgId
-                          return xs
-                        [x] -> return (x:xs)
-                        -- It might seem impossible that more than one file
-                        -- could be found in the cache for the same PkgId, but
-                        -- I've had it happen! So we chose the youngest.
-                        _   -> findYoungestFile fs >>= \x -> return (x:xs)
-          where filePrefix = concat [pkgName pkgId, "-", pkgVersion pkgId]
+-- | Given a 'PkgIdSet' and a file name, finds the pkg in the 'PkgIdSet' which
+-- corresponds to the file name.
+matchFileNameWithPkg :: PkgIdSet -> String -> Maybe PkgId
+matchFileNameWithPkg idSet fn
+  | '-' `elem` fn = findMatchingPkgId "" (removeFileNameSuffixUpToVersion fn)
+  | otherwise     = Nothing
+  where removeFileNameSuffixUpToVersion =
+          reverse . tail . dropWhile (/= '-') . reverse
+        -- Recursively splits the filename at '-' to construct PkgId
+        findMatchingPkgId :: String -> String -> Maybe PkgId
+        findMatchingPkgId nam ver =
+          case span (/= '-') ver of
+               ([]    , '-':xs  ) -> findMatchingPkgId (nam ++ "-") xs
+               (namSuf, '-':ver') ->
+                  let nam' = if nam == ""
+                                then namSuf
+                                else concat [nam, "-", namSuf]
+                      pkgId = PkgId nam' ver'
+                  in if pkgId `Set.member` idSet
+                        then Just pkgId
+                        else findMatchingPkgId nam' ver'
+               (_     , []      ) -> Nothing
+               -- This final case is unreachable given span's contract
+               _                    -> Nothing
+
+pkgCache :: PkgIdSet -> CacheDir -> IO PkgCache
+pkgCache idSet cacheDir =
+  getRealDirectoryContentsFullPaths cacheDir >>= foldM f Map.empty
+  where f m fp =
+          case matchFileNameWithPkg idSet (takeFileName fp) of
+               Just pkgId
+                 | pkgId `Map.member` m -> do
+                   latestFp <- latest fp (m Map.! pkgId)
+                   return $ Map.insert pkgId latestFp m
+                 | otherwise            ->
+                   return $ Map.insert pkgId fp m
+               Nothing    -> return m
+        latest fp1 fp2 = do
+          t1 <- getModificationTime fp1
+          t2 <- getModificationTime fp2
+          if t1 > t2 then return fp1 else return fp2
+
+installedButNotFoundInCache :: PkgIdSet -> PkgCache -> [PkgId]
+installedButNotFoundInCache pkgIdSet cache =
+  DF.foldr consIfNotInCache [] pkgIdSet
+  where consIfNotInCache pkgId xs =
+          if not (pkgId `Map.member` cache) then pkgId:xs else xs
+
 
 main :: IO ()
 main = do
   hSetBuffering stdout NoBuffering
   repoName  <- repoNameFromArgsOrShowUsage
   cacheDir  <- pacmanCacheDir
-  pkgCache' <- installedPkgIdSet >>= pkgCache cacheDir
-  putMeLn $ show pkgCache'
+  pkgIdSet  <- installedPkgIdSet
+  pkgCache' <- pkgCache pkgIdSet cacheDir
+  case installedButNotFoundInCache pkgIdSet pkgCache' of
+       [] -> return ()
+       xs ->
+         putMeLn $ "These installed pkgs were not found in your cache:\n\
+           \ " ++ intercalate "\n " (map show xs)
