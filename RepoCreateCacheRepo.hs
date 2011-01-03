@@ -1,18 +1,18 @@
 {-# LANGUAGE PatternGuards #-}
 
-import Control.Monad (foldM, liftM)
+import Control.Monad (foldM, liftM, when)
 import Data.Char (isSpace)
 import qualified Data.Foldable as DF
 import Data.List (isPrefixOf, stripPrefix, intercalate)
 import qualified Data.Map as Map
 import qualified Data.Set as Set
--- import Data.String.HT (trim)
 import HSH (run)
-import System.Directory (getModificationTime, getDirectoryContents, getCurrentDirectory)
+import System.Directory (getModificationTime, getDirectoryContents, getCurrentDirectory, copyFile)
 import System.Environment (getProgName, getArgs)
 import System.Exit (ExitCode(..), exitWith)
 import System.FilePath (replaceDirectory, takeFileName)
 import System.IO (hSetBuffering, stdout, BufferMode(NoBuffering))
+import Text.Printf (printf)
 
 
 -- * Usage and argument processing
@@ -175,6 +175,20 @@ repoAdd repo cache =
   where cacheFps :: [PkgFilePath]
         cacheFps = DF.foldr (:) [] cache
 
+copyCacheFilesToRepo :: Repo -> PkgCache -> IO ()
+copyCacheFilesToRepo repo cache = do
+  showPerc 0 False
+  DF.foldrM copy 1 cache >> return ()
+  where copy :: PkgFilePath -> Int -> IO Int
+        copy fp i = do
+          copyFile fp (fp `replaceDirectory` repoDir repo)
+          showPerc ((i*100) `div` Map.size cache) True
+          return (i+1)
+        showPerc :: Int -> Bool -> IO ()
+        showPerc perc ovr = do
+          when ovr $ putStr "\ESC[3D"  -- move cursor back 3 chars
+          printf "%2d%%" perc
+
 main :: IO ()
 main = do
   hSetBuffering stdout NoBuffering
@@ -190,3 +204,6 @@ main = do
          putMeLn $ "These installed pkgs were not found in your cache (so were\n\
                    \ not added to the repo):\n\
            \ " ++ intercalate "\n " (map show xs)
+  putMe "Copying pkg files to repo... "
+  copyCacheFilesToRepo repo pkgCache'
+  putMeLn "  I'm Done!"

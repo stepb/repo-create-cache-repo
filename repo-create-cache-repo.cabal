@@ -8,7 +8,7 @@ Maintainer:    mail4stb@gmail.com
 Build-Type:    Simple
 Cabal-Version: >=1.2
 
-Source-Repository head
+Source-Repository this
   Type:     git
   Location: git://github.com/stepb/repo-create-cache-repo.git
 
