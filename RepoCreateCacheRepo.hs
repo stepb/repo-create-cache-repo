@@ -8,7 +8,7 @@ import qualified Data.Map as Map
 import qualified Data.Set as Set
 -- import Data.String.HT (trim)
 import HSH (run)
-import System.Directory (getModificationTime, getDirectoryContents)
+import System.Directory (getModificationTime, getDirectoryContents, getCurrentDirectory)
 import System.Environment (getProgName, getArgs)
 import System.Exit (ExitCode(..), exitWith)
 import System.FilePath (replaceDirectory, takeFileName)
@@ -19,25 +19,25 @@ import System.IO (hSetBuffering, stdout, BufferMode(NoBuffering))
 
 showUsageAndExit :: ExitCode -> IO a
 showUsageAndExit exitCode = do
-  getProgName >>= \p -> putStrLn $ concat [" Usage:  ", p, " [<repo-path>] <repo-name>"]
+  getProgName >>= \p -> putStrLn $ concat [" Usage:  ", p, " <repo-name> [<repo-path>]"]
   putStrLn "   Creates a pacman repo of installed pkgs found in your pacman cache\n\
            \   dir (assuming you only have one). And copies the packages to the repo.\n\
            \ Command line args:\n\
-           \   repo-path    defaults to working dir\n\
            \   repo-name    name your repo. You should put this name in your\n\
-           \                pacman config"
+           \                pacman config\n\
+           \   repo-path    defaults to working dir"
   exitWith exitCode
 
--- TODO update
-repoNameFromArgsOrShowUsage :: IO String
-repoNameFromArgsOrShowUsage =
+repoFromArgsOrShowUsage :: IO Repo
+repoFromArgsOrShowUsage =
   getArgs >>= \argv ->
     case argv of
-         []         -> showUsageAndExit (ExitFailure 1)
-         ["-h"]     -> showUsageAndExit ExitSuccess
-         ["--help"] -> showUsageAndExit ExitSuccess
-         [x]        -> return x
-         (_:_:_)    -> showUsageAndExit (ExitFailure 1)
+         []                    -> showUsageAndExit (ExitFailure 1)
+         ["-h"]                -> showUsageAndExit ExitSuccess
+         ["--help"]            -> showUsageAndExit ExitSuccess
+         [repName']            -> return . Repo repName' =<< getCurrentDirectory
+         (repName':repDir':[]) -> return $ Repo repName' repDir'
+         _                     -> showUsageAndExit (ExitFailure 1)
 
 
 -- * General helper functions
@@ -59,11 +59,16 @@ getRealDirectoryContentsFullPaths dir = do
 
 -- * Types
 
+data Repo = Repo {
+    repoName :: String
+  , repoDir  :: FilePath
+  }
+
 type PkgName = String
 type PkgVersion = String
 
 data PkgId = PkgId {
-    pkgName :: PkgName
+    pkgName    :: PkgName
   , pkgVersion :: PkgVersion
   }
   deriving (Eq, Ord)
@@ -160,16 +165,28 @@ installedButNotFoundInCache pkgIdSet cache =
   where consIfNotInCache pkgId xs =
           if not (pkgId `Map.member` cache) then pkgId:xs else xs
 
+repoAdd :: Repo -> PkgCache -> IO ()
+repoAdd repo cache =
+  run (  "repo-add"
+       , [  "-q"
+          , (repoName repo `replaceDirectory` repoDir repo) ++ ".db.tar.gz"
+         ] ++ cacheFps
+      )
+  where cacheFps :: [PkgFilePath]
+        cacheFps = DF.foldr (:) [] cache
 
 main :: IO ()
 main = do
   hSetBuffering stdout NoBuffering
-  repoName  <- repoNameFromArgsOrShowUsage
+  repo      <- repoFromArgsOrShowUsage
   cacheDir  <- pacmanCacheDir
   pkgIdSet  <- installedPkgIdSet
   pkgCache' <- pkgCache pkgIdSet cacheDir
+  putMeLn "Running repo-add:"
+  repoAdd repo pkgCache'
   case installedButNotFoundInCache pkgIdSet pkgCache' of
        [] -> return ()
        xs ->
-         putMeLn $ "These installed pkgs were not found in your cache:\n\
+         putMeLn $ "These installed pkgs were not found in your cache (so were\n\
+                   \ not added to the repo):\n\
            \ " ++ intercalate "\n " (map show xs)
